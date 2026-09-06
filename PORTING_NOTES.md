@@ -272,3 +272,32 @@ Cannot install transformers.
 Poetry's pure-Python git client (dulwich) mishandles the protocol on a repo the size of
 huggingface/transformers. Fix: `poetry config system-git-client true` to use the real
 `git` binary. Everything else in the lock had already installed by this point.
+
+### Stage 2 complete
+
+`poetry install` EXIT=0 on the third attempt (resolver fix, then keyring, then dulwich).
+`.venv` = 9.2 GB. `transformers 4.49.0.dev0` at the pinned rev, `AutoModel` (the DINO path
+used by segmentation) imports, `sam2` imports, `run_asset_generation.py` parses.
+`poetry check` emits only cosmetic warnings about upstream's `[tool.poetry]` style.
+
+### Stage 3 — native CUDA toolchain verified before building anything
+
+Before attempting tiny-cuda-nn, confirmed the full native path works, since every
+remaining stage (tcnn, pytorch3d, the GS rasterizers, BundleSDF) depends on it:
+
+```bash
+nvcc -arch=sm_120 -o /tmp/t /tmp/t.cu   # CUDA 12.8 + host gcc 13.3  -> COMPILE OK
+/tmp/t                                   # -> "hi"   (ran on the 5090)
+```
+
+So CUDA 12.8's nvcc accepts Ubuntu 24.04's gcc 13.3 as host compiler *and* emits working
+sm_120 code. No need for a conda `gxx_linux-64` shim.
+
+Build environment for every CUDA extension from here on:
+```bash
+export CUDA_HOME=$HOME/micromamba/envs/r2s-cuda
+export PATH=$CUDA_HOME/bin:$PATH
+export TCNN_CUDA_ARCHITECTURES=120
+export TORCH_CUDA_ARCH_LIST="12.0"
+export MAX_JOBS=4          # never $(nproc): 30 GB RAM, parallel nvcc balloons
+```
