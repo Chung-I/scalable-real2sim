@@ -149,3 +149,58 @@ torchvision 0.22.1+cu128, numpy 2.2.5, opencv-python 4.11.0.86, sam2 0.4.1, open
 `systemd-run --user --scope -p MemoryMax=12G -p MemorySwapMax=4G -- <cmd>`
 (verified working on this box). Without it an OOM kill takes the whole tmux scope,
 including the agent session.
+
+### Gotcha — Poetry keyring / DBus on this box
+
+`poetry install` died mid-run with:
+
+```
+DBusErrorResponse [org.freedesktop.DBus.Error.UnknownMethod]
+  ('Object does not exist at path "/org/freedesktop/secrets/collection/_1b_96_ff_bf_ebV"')
+  -> ItemNotFoundException: Item does not exist!
+Cannot install msgpack.
+```
+
+Poetry probes the SecretStorage keyring (`poetry lock -v` even prints
+"Checking keyring availability: Available"), but this session has no unlocked
+secret-service collection, so the lookup raises and the install aborts partway.
+Nothing to do with dependencies — it stopped on `msgpack`, right after the nvidia
+CUDA wheels.
+
+Fix (both applied, belt and braces):
+```bash
+poetry config keyring.enabled false
+export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring
+```
+`poetry install` is resumable — re-running skips what already landed.
+
+### Stage 6 plan — BundleSDF without root
+
+`BundleSDF/setup.bash` (274 lines) is the hardest piece. As written it:
+
+1. `sudo apt-get install`s ~50 `-dev` packages (gtk, qt5, ffmpeg codecs, boost, flann,
+   glog, gflags, yaml-cpp, zeromq, hdf5, proj, protobuf, ...) — **needs root, unavailable**;
+2. builds **Eigen 3.4.0, OpenCV + opencv_contrib, PCL, and pybind11 from source**, each
+   with `make -j$(nproc)` — on 30 GB RAM an unbounded OpenCV/PCL build is a near-certain
+   OOM, which on this box takes the whole session with it;
+3. pins a stack that cannot work on Blackwell:
+   `torch==2.4.0` (no sm_120) and
+   `pytorch3d ... py310_cu118_pyt201` (**CUDA 11.8**), plus `numpy==1.26.1`,
+   `Cython==0.29.20`, `scikit-image==0.17.2`, `networkx==2.2`.
+
+Planned adaptation (do **not** run `setup.bash` as-is):
+
+- Replace the whole apt list *and* the four source builds with a dedicated micromamba
+  env (`r2s-bundlesdf`) pulling `eigen`, `opencv`, `pcl`, `boost-cpp`, `flann`, `glog`,
+  `gflags`, `yaml-cpp`, `zeromq`, `hdf5`, `proj`, `protobuf`, `pybind11` from
+  conda-forge. This removes hours of compiling and the main OOM risk, and needs no root.
+- Point BundleSDF's own CMake at that env via `CMAKE_PREFIX_PATH`.
+- Bump `torch==2.4.0` -> `2.7.1+cu128`; build **pytorch3d from source** (shared problem
+  with Stage 4, so build the wheel once and reuse it in both venvs).
+- The ancient pins (`scikit-image==0.17.2`, `networkx==2.2`, `Cython==0.29.20`) will
+  likely refuse to build against modern setuptools on cp310 — expect to relax them.
+- Any remaining `make` must be bounded (`-j4`), never `-j$(nproc)`, and run inside the
+  systemd scope.
+
+Note BundleSDF keeps its own venv with `numpy==1.26.1`, which conflicts with the core
+env's numpy 2.2.5 — that is fine and intentional, they are separate environments.
