@@ -5,4 +5,5 @@ checkpoints
 __pycache__
 outputs
 .vscode
-tests
+tests.cuda_install.log
+*.log
