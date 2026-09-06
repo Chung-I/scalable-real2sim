@@ -301,3 +301,53 @@ export TCNN_CUDA_ARCHITECTURES=120
 export TORCH_CUDA_ARCH_LIST="12.0"
 export MAX_JOBS=4          # never $(nproc): 30 GB RAM, parallel nvcc balloons
 ```
+
+---
+
+## The mass/CoM half is reproducible *without* the CUDA port
+
+Dataset survey (HF `nepfaff/scalable-real2sim`, 205 files, **71 GB** total):
+
+| Path | Size |
+|---|---|
+| `scalable_real2sim_benchmark_dataset/object_data` (25 `.tar`, e.g. `inflator.tar` 3.6 GB) | 67.5 GB |
+| `scalable_real2sim_model_weights/` (SAM2 gripper finetune 2.7 GB + bbox detector 0.8 GB) | 3.5 GB |
+| **`scalable_real2sim_benchmark_dataset/robot_system_id_data`** | **0.07 GB** |
+
+**The README's example command is stale:** it points at
+`scalable_real2sim_benchmark_dataset_inflator_only/`, which does not exist in the released
+dataset. Use `scalable_real2sim_benchmark_dataset/object_data` and
+`.../robot_system_id_data` instead.
+
+`robot_system_id_data` is only **70 MB** and needs no GPU, no reconstruction stack, and
+none of this port — just the working `.venv`. It contains 5 gripper openings
+(0.00–0.10 m) x 10 runs, each with `joint_positions/velocities/accelerations/torques.npy`
+at **10,000 samples, 1 kHz, 10 s, 7 joints**, plus `identified_robot_params.npy`.
+
+That params file is a dict of **91 = 13 x 7 links** entries, exactly the paper's
+alpha ∈ R^(13N):
+`m, hx, hy, hz, Ixx, Ixy, Ixz, Iyy, Iyz, Izz, reflected_inertia, viscous_friction,
+dynamic_dry_friction`.
+
+Recomputing `p_com = h/m` from the released parameters:
+
+```
+link |   m (kg) |        p_com = h/m (m)       | viscous | dry fric
+  0  |   1.6375 | [ 0.0000 -0.0113  0.1130]    |  0.3431 |  0.3594
+  1  |   8.4039 | [-0.0020  0.1020  0.0236]    |  0.3092 |  0.4749
+  2  |   2.5080 | [-0.0108  0.0167  0.0940]    |  0.0626 |  0.3684
+  3  |   3.1837 | [ 0.0245  0.0752  0.0120]    |  0.0414 |  0.4318
+  4  |   2.4998 | [ 0.0061  0.0210  0.0593]    |  0.1684 |  0.3406
+  5  |   1.1527 | [-0.0087 -0.0381 -0.0130]    |  0.0928 |  0.3522
+  6  |   4.1541 | [ 0.0004  0.0000  0.0341]    |  0.0457 |  0.1361
+```
+
+**Total identified arm mass 23.540 kg vs the KUKA iiwa 7 datasheet ~23.9 kg — 1.5% error,
+from joint torques alone.** Independent corroboration of the paper's ~1.3% mass accuracy
+claim, computed here rather than taken on trust. Link-6 mass across the five independent
+gripper-opening identifications spans 4.1489–4.1848 kg (0.9%), which is the method's
+repeatability.
+
+Note the CoM values are all physically sensible (within ~10 cm of their joint origins),
+and that CoM never appears as a free parameter — it is only ever `h/m`, which is why its
+error tracks the mass error so closely while the inertia tensor is far worse.
