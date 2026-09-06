@@ -370,3 +370,56 @@ CUDA 12.8 env.
   continued untouched inside its systemd scope. Exactly the outcome the scope is for:
   without it, that pressure is what has previously killed whole sessions on this box.
   Poll the log manually rather than holding a background waiter open during this build.
+
+### Stage 3 — the conda-CUDA layout trap (and the fix)
+
+First tcnn build failed with:
+
+```
+fatal error: cuda_runtime_api.h: No such file or directory
+ninja: build stopped: subcommand failed.
+RuntimeError: Error compiling objects for extension
+```
+
+The `.cu` files compiled fine (ptxas ran on `cutlass_mlp.ptx`), and the command line showed
+`-DTCNN_MIN_GPU_ARCH=120`, so Blackwell targeting was correct. What failed was the **host
+C++** compile.
+
+Cause: conda's `cuda-toolkit` puts headers under
+`$CUDA_HOME/targets/x86_64-linux/include/`, while `$CUDA_HOME/include` **already exists as
+a different directory** (binutils/OpenCL headers from other conda packages). torch's
+`cpp_extension` blindly adds `-I$CUDA_HOME/include`, which therefore contains no CUDA
+headers. It also emits `-L$CUDA_HOME/lib64`, and conda has only `lib`.
+
+Fix — make the conda env look like a standard CUDA install:
+```bash
+ln -sfn $CUDA_HOME/targets/x86_64-linux/include/* $CUDA_HOME/include/
+[ -d $CUDA_HOME/lib64 ] || ln -sfn $CUDA_HOME/lib $CUDA_HOME/lib64
+```
+plus, for good measure, `CPATH=$CUDA_HOME/targets/x86_64-linux/include` and
+`LIBRARY_PATH=$CUDA_HOME/lib`.
+
+**This will apply to every remaining CUDA extension** (pytorch3d, diff-gaussian-
+rasterization, simple-knn, nvdiffrast, BundleSDF), not just tcnn.
+
+Result — tiny-cuda-nn builds and runs on sm_120:
+```
+HashGrid + FullyFusedMLP  forward OK -> (4096, 4) torch.float16;  backward OK
+```
+`FullyFusedMLP` is the most architecture-sensitive kernel in the project, so this is a
+strong signal for the remaining builds.
+
+**Logging gotcha:** `echo "EXIT=$?" >> log` appended to the last line because uv's output
+has no trailing newline, so `grep -q "^EXIT="` never matched and the waiters hung on an
+already-failed build. Use `printf "\nDONE_EXIT=%s\n"`.
+
+### Stage 4 prep — empty vendored glm
+
+`Frosting/gaussian_splatting/submodules/diff-gaussian-rasterization/third_party/glm` ships
+**empty** (Frosting has no `.gitmodules`, and the rasterizer/simple-knn sources are vendored
+directly, so nothing populates it). The rasterizer only needs `glm/glm.hpp`:
+```bash
+git clone --depth 1 --branch 0.9.9.8 https://github.com/g-truc/glm third_party/glm
+```
+The rasterizer's `setup.py` hardcodes no architecture — it only passes the glm include —
+so `TORCH_CUDA_ARCH_LIST="12.0"` is what drives sm_120 codegen.
