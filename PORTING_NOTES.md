@@ -351,3 +351,22 @@ repeatability.
 Note the CoM values are all physically sensible (within ~10 cm of their joint origins),
 and that CoM never appears as a free parameter — it is only ever `h/m`, which is why its
 error tracks the mass error so closely while the inertia tensor is far worse.
+
+### Stage 3 — tiny-cuda-nn build notes
+
+`uv pip install --no-build-isolation "git+https://github.com/NVlabs/tiny-cuda-nn@cc-120#subdirectory=bindings/torch"`
+with `TCNN_CUDA_ARCHITECTURES=120`, `MAX_JOBS=4`, `CUDA_HOME` pointing at the micromamba
+CUDA 12.8 env.
+
+- `--no-build-isolation` is **required**: tcnn's `bindings/torch/setup.py` imports `torch`
+  at build time, so an isolated build env (which has no torch) fails. Install
+  `setuptools wheel ninja` into the target venv first.
+- Resolution alone took **4m10s** — the `cc-120` branch drags in large submodules (cutlass).
+- The heavy phase is `ptxas -arch sm_120` on `cutlass_mlp.ptx` and `encoding.ptx`;
+  individual `ptxas`/`cicc` processes peak around **1.0–1.1 GB RSS each**, so with
+  `MAX_JOBS=4` the build sits comfortably under the 12 GB scope cap.
+- Even so, this build generates enough system-wide memory pressure to trip the agent
+  harness's watchdog, which killed the *polling* processes twice while the build itself
+  continued untouched inside its systemd scope. Exactly the outcome the scope is for:
+  without it, that pressure is what has previously killed whole sessions on this box.
+  Poll the log manually rather than holding a background waiter open during this build.
