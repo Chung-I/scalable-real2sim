@@ -47,9 +47,9 @@ so every GPU component fails on this box until re-pinned and rebuilt.
 
 - [x] 0. Survey box; clone all 5 submodules (SSH via `gh` account `Chung-I`)
 - [x] 1. CUDA 12.8 toolkit + colmap via micromamba (no root) — **done**, see below
-- [~] 2. Core Poetry env, torch re-pinned to 2.7.1+cu128 — lock resolved, install running
-- [ ] 3. nerfstudio env + tiny-cuda-nn (`cc-120` branch)
-- [ ] 4. Frosting: pytorch3d from source, diff-gaussian-rasterization, simple-knn, nvdiffrast
+- [x] 2. Core Poetry env, torch re-pinned to 2.7.1+cu128 — **done**, sm_120 validated
+- [x] 3. nerfstudio env + tiny-cuda-nn (`cc-120` branch) — **done**
+- [~] 4. Frosting: deps in; pytorch3d building from source; rasterizers next
 - [ ] 5. Neuralangelo (reuses tiny-cuda-nn)
 - [ ] 6. BundleSDF: adapt `setup.bash` to a sudo-free conda-forge dependency set
 - [ ] 7. LoFTR `outdoor_ds.ckpt` weights (manual Google Drive download)
@@ -423,3 +423,38 @@ git clone --depth 1 --branch 0.9.9.8 https://github.com/g-truc/glm third_party/g
 ```
 The rasterizer's `setup.py` hardcodes no architecture — it only passes the glm include —
 so `TORCH_CUDA_ARCH_LIST="12.0"` is what drives sm_120 codegen.
+
+### Stage 3 complete
+
+```
+nerfstudio   1.1.5      gsplat     1.4.0
+tinycudann   1.7        nerfacc    0.5.2
+torch        2.7.1+cu128   cuda: True  NVIDIA GeForce RTX 5090
+methods: 46 | nerfacto present: True | gsplat rasterization import OK
+```
+Only deprecation warnings (`torch.cuda.amp.custom_fwd` → `torch.amp.custom_fwd`), harmless.
+
+**nerfstudio gotcha:** `fpsample==1.0.2` (a nerfstudio dependency) uses `scikit_build_core`
+as its build backend but never declares it, which is invisible until you pass
+`--no-build-isolation` (required here because tcnn/gsplat import torch at build time).
+Fix: `uv pip install scikit_build_core cmake pybind11` into the venv first.
+
+### Stage 4 — Frosting
+
+`requirements.txt` is a 138-line `pip freeze` pinning `torch==2.3.0`, `torchvision==0.18.0`,
+`open3d==0.17.0`. Generated `requirements-blackwell.txt` which:
+- drops `torch`/`torchvision`/`torchaudio` (installed separately as `+cu128` **first**, so
+  the freeze cannot pull a CPU/cu121 build over them — verified afterwards that the venv
+  still reports `2.7.1+cu128`),
+- bumps `open3d` 0.17.0 → 0.19.0 (0.17 is too old for this stack),
+- leaves `numpy==1.26.2` (fine with torch 2.7, and pytorch3d prefers numpy 1.x).
+
+Pre-staged before building:
+- `third_party/glm` ← glm 0.9.9.8 (shipped empty, see above)
+- `nvdiffrast` ← cloned; it JIT-compiles its CUDA plugin on first use, so it needs
+  `CUDA_HOME` at **runtime**, not just build time.
+
+**pytorch3d is built from `main`, not the `V0.7.8` tag.** No prebuilt wheel exists for
+`py310_cu128_pyt271` (upstream's `py310_cu121_pyt231` URL is dead for us), and V0.7.8
+predates torch 2.7 by a wide margin, so it risks removed ATen APIs. `main` tracks current
+torch. Fallback is V0.7.8 if `main` fails.
