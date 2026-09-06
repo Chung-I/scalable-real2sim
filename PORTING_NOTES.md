@@ -227,3 +227,48 @@ a torch that actually targets this GPU.
 
 Also of note: `poetry install` had to be run **twice** — see the keyring gotcha above.
 The first run got as far as the nvidia CUDA wheels before aborting.
+
+### Stage 2 — post-install verification
+
+A clean install does not prove the 18-month jump from upstream's Feb-2025 drake nightly
+to drake 1.41.0 is harmless, so the affected imports were exercised explicitly:
+
+| Import | Result |
+|---|---|
+| `pydrake` | OK (no segfault — the old 1.37.0 worry did not materialise) |
+| `manipulation.utils.ConfigureParser` | OK |
+| `manipulation.station` → `MakeHardwareStation`, `Scenario`, `LoadScenario` | OK |
+| `sam2`, `open3d` 0.19.0, `trimesh`/`coacd`/`vhacdx` | OK |
+| `robot_payload_id` + `.optimization` `.symbolic` `.data` `.utils` `.environment` `.control` | **all OK** |
+
+`optimization` and `symbolic` are the modules most exposed to Drake API drift (they drive
+MathematicalProgram, the SDP solve, and symbolic regressor construction), so those passing
+is the real evidence that drake 1.41.0 + manipulation 2025.5.18 is a sound pairing.
+
+**SDP solvers** (the README says robot identification wants a MOSEK license):
+
+```
+Mosek     available=True   enabled=False   <- bundled, but no license
+SCS       available=True   enabled=True
+CSDP      available=True   enabled=True
+Clarabel  available=True   enabled=True
+```
+
+So identification will run, falling back to SCS/CSDP/Clarabel for the pseudo-inertia
+constraint (J ≻ 0). Expect slower solves and possibly looser solutions than the paper.
+To use MOSEK, drop a licence at `~/mosek/mosek.lic` (free for academics) — `enabled`
+flips to True with no code change.
+
+### Gotcha — Poetry's bundled git client (dulwich)
+
+The pinned `transformers` git revision failed to install with:
+
+```
+GitProtocolError: Length of pkt read 1532 does not match length prefix 4005
+  at dulwich/protocol.py:270 in read_pkt_line
+Cannot install transformers.
+```
+
+Poetry's pure-Python git client (dulwich) mishandles the protocol on a repo the size of
+huggingface/transformers. Fix: `poetry config system-git-client true` to use the real
+`git` binary. Everything else in the lock had already installed by this point.
