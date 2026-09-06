@@ -204,3 +204,26 @@ Planned adaptation (do **not** run `setup.bash` as-is):
 
 Note BundleSDF keeps its own venv with `numpy==1.26.1`, which conflicts with the core
 env's numpy 2.2.5 — that is fine and intentional, they are separate environments.
+
+### Stage 2 — Blackwell validation (the milestone that matters)
+
+With `.venv` built from the re-pinned lock:
+
+```
+torch      : 2.7.1+cu128
+cuda build : 12.8
+available  : True
+device     : NVIDIA GeForce RTX 5090
+capability : (12, 0)
+arch list  : ['sm_75','sm_80','sm_86','sm_90','sm_100','sm_120','compute_120']
+matmul     : OK   (4096x4096 on device)
+```
+
+**`sm_120` is in the arch list and a real matmul executes on the GPU.** This is the
+assumption the entire port rests on — upstream's torch 2.3.1 stops at sm_90 and would
+fail here with "no kernel image is available for execution on the device". Everything
+downstream (tiny-cuda-nn, pytorch3d, the rasterizers, BundleSDF) can now be built against
+a torch that actually targets this GPU.
+
+Also of note: `poetry install` had to be run **twice** — see the keyring gotcha above.
+The first run got as far as the nvidia CUDA wheels before aborting.
