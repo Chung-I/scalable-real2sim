@@ -49,9 +49,9 @@ so every GPU component fails on this box until re-pinned and rebuilt.
 - [x] 1. CUDA 12.8 toolkit + colmap via micromamba (no root) — **done**, see below
 - [x] 2. Core Poetry env, torch re-pinned to 2.7.1+cu128 — **done**, sm_120 validated
 - [x] 3. nerfstudio env + tiny-cuda-nn (`cc-120` branch) — **done**
-- [~] 4. Frosting: deps in; pytorch3d building from source; rasterizers next
-- [ ] 5. Neuralangelo (reuses tiny-cuda-nn)
-- [ ] 6. BundleSDF: adapt `setup.bash` to a sudo-free conda-forge dependency set
+- [x] 4. Frosting: pytorch3d 0.7.9 + rasterizers + nvdiffrast — **done**
+- [x] 5. Neuralangelo — **done**
+- [~] 6. BundleSDF: conda deps + CMake/arch patches done; pytorch3d building
 - [ ] 7. LoFTR `outdoor_ds.ckpt` weights (manual Google Drive download)
 - [ ] 8. Benchmark dataset from HuggingFace; end-to-end asset-generation smoke test
 
@@ -458,3 +458,80 @@ Pre-staged before building:
 `py310_cu128_pyt271` (upstream's `py310_cu121_pyt231` URL is dead for us), and V0.7.8
 predates torch 2.7 by a wide margin, so it risks removed ATen APIs. `main` tracks current
 torch. Fallback is V0.7.8 if `main` fails.
+
+### Stage 4 complete — Frosting
+
+```
+torch 2.7.1+cu128 | pytorch3d 0.7.9 (built from main)
+diff_gaussian_rasterization  import OK
+simple_knn distCUDA2         CUDA kernel OK -> (1000,)
+nvdiffrast                   import OK (plugin JIT-compiles on first rasterize)
+```
+
+Two failures, both worth recording:
+
+**1. GCC 13, not Blackwell.** `rasterizer_impl.h` and `simple_knn.cu` use
+`uint32_t`/`uint64_t`/`std::uintptr_t` with no `#include <cstdint>`:
+```
+rasterizer_impl.h(24): error: namespace "std" has no member "uintptr_t"
+rasterizer_impl.h(40): error: identifier "uint32_t" is undefined
+```
+GCC 13 removed the transitive `<cstdint>` includes this 2023-era code relied on. Patched
+both files (simple-knn uses fixed-width ints 13x and would have failed immediately after).
+**This is an upstream bug that breaks on any modern distro — worth a PR to Frosting.**
+
+**2. simple-knn must NOT be installed editable.** Its `setup.py` declares no `packages=`
+and there is no `simple_knn/__init__.py`, so the editable finder maps nothing and
+`import simple_knn` fails even though `simple_knn/_C*.so` built fine. Install it
+non-editable (`pip install submodules/simple-knn/`). diff-gaussian-rasterization *does*
+have an `__init__.py`, which is why `-e` works there — upstream's `setup.bash` uses `-e`
+for both.
+
+### Stage 5 complete — Neuralangelo
+
+`requirements-blackwell.txt` changes:
+- tiny-cuda-nn `master` → **`@cc-120`** (master's max architecture predates Blackwell)
+- dropped `pathlib` — the PyPI package is an obsolete backport that shadows the stdlib module
+
+uv reused the tcnn wheel built for the nerfstudio env, so this stage took seconds rather
+than another full compile. Verified: `tcnn HashGrid OK -> (2048, 32)` on the 5090.
+
+**Build-backend gotcha (2nd instance):** `gpustat==1.1.1` needs `setuptools_scm` but does
+not declare it — same class as `fpsample`/`scikit_build_core` in Stage 3. Under
+`--no-build-isolation` nothing supplies these. Pre-install the common backends into each
+venv up front: `setuptools wheel ninja setuptools_scm scikit_build_core cmake pybind11
+Cython numpy poetry-core hatchling flit_core`.
+
+### Stage 6 — BundleSDF
+
+Replaced the ~50 `sudo apt-get` packages **and** the four source builds (Eigen, OpenCV +
+contrib, PCL, pybind11, yaml-cpp) with one conda-forge env, `r2s-bundlesdf`:
+`eigen opencv pcl yaml-cpp pybind11 boost-cpp flann glog gflags hdf5 proj protobuf zeromq
+cmake ninja`. No root, and it skips hours of compiling plus the `make -j$(nproc)` OOM risk.
+
+**Two more hardcoded architectures found** — both would have built cleanly and then failed
+at runtime on the 5090:
+- `BundleTrack/CMakeLists.txt`:
+  `set(CUDA_NVCC_FLAGS "... -gencode=arch=compute_86,code=sm_86 ...")` and
+  `set(CMAKE_CUDA_ARCHITECTURES 52 60 61 70 75 80 86)` → both now target **120**.
+- `mycuda/setup.py`: `nvcc_flags = [..., '-arch=sm_86']` → **`-arch=sm_120`**.
+
+`BundleTrack/CMakeLists.txt` also did
+`find_package(PCL REQUIRED PATHS ${CMAKE_PREFIX_PATH} NO_DEFAULT_PATH)` with
+`CMAKE_PREFIX_PATH` pointing only at `../local` (where setup.bash's source builds landed).
+Added an opt-in hook so the conda env can be used instead:
+```cmake
+if(DEFINED ENV{BUNDLESDF_DEPS_PREFIX})
+  set(CMAKE_PREFIX_PATH "${CMAKE_PREFIX_PATH};$ENV{BUNDLESDF_DEPS_PREFIX}")
+endif()
+```
+
+Python pins relaxed: `numpy==1.26.1`, `Cython==0.29.20`, `scikit-image==0.17.2`,
+`networkx==2.2` are all from ~2020 and will not build on cp310 with modern setuptools.
+They are also **vestigial** — upstream's own `setup.bash` reinstalls unpinned
+`scikit-image` and does `pip install --upgrade networkx` at the end, overwriting them.
+
+**`uv venv` ships no pip.** Frosting got away with `python -m pip` only because its
+requirements freeze happened to include `pip`; BundleSDF's venv did not, so
+`.venv/bin/python -m pip` failed with `No module named pip`. Install pip explicitly into
+any uv-created venv whose build steps shell out to it.
