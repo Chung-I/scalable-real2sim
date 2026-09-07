@@ -51,7 +51,7 @@ so every GPU component fails on this box until re-pinned and rebuilt.
 - [x] 3. nerfstudio env + tiny-cuda-nn (`cc-120` branch) — **done**
 - [x] 4. Frosting: pytorch3d 0.7.9 + rasterizers + nvdiffrast — **done**
 - [x] 5. Neuralangelo — **done**
-- [~] 6. BundleSDF: conda deps + CMake/arch patches done; pytorch3d building
+- [x] 6. BundleSDF: kaolin + mycuda + BundleTrack — **done**
 - [ ] 7. LoFTR `outdoor_ds.ckpt` weights (manual Google Drive download)
 - [ ] 8. Benchmark dataset from HuggingFace; end-to-end asset-generation smoke test
 
@@ -598,3 +598,67 @@ were downstream call sites.
 - **`AT_DISPATCH_FLOATING_TYPES(tensor.type(), ...)`** in `mycuda/common.cu` — `.type()`
   returns the deprecated `DeprecatedTypeProperties`; modern torch requires
   `.scalar_type()`. Three call sites.
+
+### Stage 6 complete
+
+```
+torch      : 2.7.1+cu128  NVIDIA GeForce RTX 5090
+my_cpp     : OK  (BundleTrack C++; exposes Bundler, Frame, GluNet, ...)
+mycuda     : OK  (common, gridencoder)
+kaolin     : 0.18.0   (all 13 APIs BundleSDF uses still exist)
+pytorch3d  : 0.7.9
+```
+
+BundleTrack built to 100% with 0 errors. Note the Python-side `cv2` remains pip's
+opencv-python (no CUDA) and that is correct: BundleSDF's Python code has **zero**
+`cv2.cuda` uses, so only the C++ side needs the CUDA build, which it links directly.
+
+Last fix of the stage: `FeatureManager.cpp` calls `pcl::geometry::distance` without
+including `<pcl/common/geometry.h>`; PCL >= 1.11 no longer pulls it in transitively.
+
+**Running it** — `my_cpp` and the shared libraries have to be reachable:
+```bash
+export LD_LIBRARY_PATH=<BundleSDF>/local/lib:<deps env>/lib:<cuda env>/lib:$LD_LIBRARY_PATH
+export PYTHONPATH=<BundleSDF>:<BundleSDF>/BundleTrack/build:$PYTHONPATH
+```
+
+`setup_blackwell.bash` now reproduces all of stage 6 from scratch and is verified end
+to end.
+
+---
+
+## Port summary
+
+All six stages complete. What the port actually consisted of:
+
+| Category | Count | Instances |
+|---|---|---|
+| Hardcoded CUDA architectures | 4 | tiny-cuda-nn (`cc-120` branch), `BundleTrack/CMakeLists.txt` (`52 60 61 70 75 80 86`), `mycuda/setup.py` (`-arch=sm_86`), OpenCV (`CUDA_ARCH_BIN`) |
+| Dead or unreachable pins | 4 | drake nightly pruned + no cp310; pytorch3d `cu121` wheel; pytorch3d `cu118` wheel; opencv_contrib `rgbd`/`xfeatures2d` gone after 4.12 |
+| Toolchain-era breakage | 5 | GCC 13 dropped transitive `<cstdint>`; conda CUDA header/lib64 layout; PCL 1.11 `boost::`→`std::shared_ptr` (52 sites); `pcl/common/geometry.h`; torch `AT_DISPATCH` `.type()`→`.scalar_type()` |
+| Packaging / tooling traps | 7 | Poetry keyring/DBus; Poetry dulwich; editable `simple-knn`; 2x undeclared build backends; `uv venv` has no pip; VA-API link failure |
+| Genuinely unavailable | 1 | conda-forge OpenCV has no CUDA modules — the one unavoidable source build |
+
+Only the first row is about Blackwell. Everything else is eighteen months of drift in a
+research repo plus a distro newer than the one it was written for.
+
+**Environments produced**
+
+| Path | Contents |
+|---|---|
+| `~/micromamba/envs/r2s-cuda` | nvcc 12.8 (build-time toolkit) |
+| `~/micromamba/envs/r2s-colmap` | COLMAP 4.2.0 with CUDA |
+| `~/micromamba/envs/r2s-bundlesdf` | C++ deps for BundleTrack |
+| `.venv` | core: SAM2, asset generation, robot_payload_id |
+| `.venv_nerfstudio` | nerfstudio 1.1.5, gsplat 1.4.0, tinycudann 1.7 |
+| `Frosting/.venv` | pytorch3d 0.7.9, rasterizers, nvdiffrast |
+| `neuralangelo/.venv` | tinycudann |
+| `BundleSDF/.venv` + `BundleSDF/local` | kaolin, mycuda, my_cpp; CUDA OpenCV 4.12.0 |
+
+**Forks** (each carries a `blackwell-port` branch): `Chung-I/scalable-real2sim`,
+`Chung-I/robot_payload_id`, `Chung-I/Frosting`, `Chung-I/neuralangelo`,
+`Chung-I/BundleSDF`.
+
+**Not done** (out of scope so far): LoFTR `outdoor_ds.ckpt` weights (manual Google Drive
+download), the 71 GB benchmark dataset beyond the 70 MB `robot_system_id_data` already
+fetched, and an end-to-end `run_asset_generation.py` run.
