@@ -720,3 +720,55 @@ Worth stating plainly: **simple-knn must be non-editable** (no `__init__.py`, so
 editable finder maps nothing) while **mycuda must be editable** (the code imports it as a
 package). Upstream's setup.bash uses `-e` for both; correcting that uniformly breaks one
 or the other.
+
+---
+
+## Validation: inertial parameters vs upstream's own reference
+
+`inflator.tar` ships upstream's `bundle_sdf_inertial_params.json`, so the smoke run is a
+*validation*, not just a smoke test. Ours came from a **360-frame** reconstruction (every
+5th frame; the full 1800-frame merge OOMs on a 30 GB box), theirs from the full set.
+
+| quantity | ours | reference | difference |
+|---|---|---|---|
+| mass (kg) | 0.654720 | 0.654722 | **0.00 %** |
+| \|CoM\| (mm) | 34.71 | 34.29 | 1.24 % |
+| inertia Frobenius | 0.045488 | 0.045465 | 0.05 % |
+| inertia eigenvalues | 3.0e-6, 0.032164, 0.032165 | 3.0e-6, 0.032148, 0.032148 | **0.05 %** |
+
+The raw CoM *looks* wrong — y and z have opposite signs, 68 mm apart. That is a
+**canonical-frame convention**, not an error: rotating the reference 180 degrees about x
+drops the residual from **68.46 mm to 2.08 mm**. The mesh canonicalisation step landed in
+a differently-oriented frame for our shorter reconstruction, which flips y and z.
+
+The frame-independent quantities are the ones that matter, and they agree:
+- mass is frame-independent -> matches to 6 significant figures
+- inertia **eigenvalues** are rotation-invariant -> 0.05 %
+- CoM magnitude is rotation-invariant -> 1.24 %
+
+So the identification pipeline (arm-alone parameters, arm+object parameters, subtraction
+under the pseudo-inertia constraint) reproduces upstream's numbers on Blackwell, using a
+5x-decimated reconstruction. Mass and inertia are insensitive to the mesh detail; only the
+frame convention moved.
+
+### Final blocker before this ran
+
+`robot_payload_id/utils/utils.py` locates its Drake models via
+`Path(__file__).parent.parent.parent / "models" / "package.xml"`. That arithmetic assumes a
+**source tree**. Poetry installs the path dependency as a *copy* into site-packages, where
+three levels up is `site-packages/` itself, so it fails with
+`XML_ERROR_FILE_NOT_FOUND`. Fix: install it editable
+(`uv pip install --no-deps -e scalable_real2sim/robot_payload_id`).
+
+That is the **third** editable-vs-copy decision in this port, and all three need different
+answers:
+
+| package | required mode | why |
+|---|---|---|
+| `simple-knn` | **non-editable** | declares no `packages=` and has no `__init__.py`, so the editable finder maps nothing |
+| `mycuda` | **editable** | code does `from mycuda import common`, needing the .so built in place |
+| `robot_payload_id` | **editable** | resolves a data directory relative to `__file__` |
+
+Also note the first run of the identification pulls **drake_models** (a large tarball from
+github.com/RobotLocomotion/models) into `~/.cache/drake`; it downloaded at ~0.5 MB/s here
+and retried a mirror once, so expect several minutes before any output appears.
