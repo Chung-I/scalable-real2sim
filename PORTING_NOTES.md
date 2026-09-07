@@ -535,3 +535,66 @@ They are also **vestigial** — upstream's own `setup.bash` reinstalls unpinned
 requirements freeze happened to include `pip`; BundleSDF's venv did not, so
 `.venv/bin/python -m pip` failed with `No module named pip`. Install pip explicitly into
 any uv-created venv whose build steps shell out to it.
+
+### Stage 6 — where the conda-forge substitution stops working
+
+The conda-forge strategy replaced Eigen, PCL, yaml-cpp, pybind11, boost, flann, glog,
+gflags, hdf5, proj, protobuf, zeromq/cppzmq, OpenGL/GLUT/GLEW and MPI successfully. It
+fails for exactly one dependency:
+
+**conda-forge's OpenCV has no CUDA modules** — 0 `cuda*` headers, 0 `libopencv_cuda*`
+libraries. BundleTrack needs `cudafeatures2d.hpp`, `cudaimgproc.hpp` and
+`cudaoptflow.hpp`. This is precisely why upstream's `setup.bash` compiles OpenCV +
+opencv_contrib from source, and there is no way around it.
+
+**OpenCV 4.12.0 specifically**: opencv_contrib **dropped `rgbd` and `xfeatures2d` after
+4.12** (verified against the 4.13.x tree), and BundleTrack includes both
+(`opencv2/rgbd.hpp`, `opencv2/xfeatures2d/nonfree.hpp`). 4.12 is also new enough to accept
+`CUDA_ARCH_BIN=12.0`. `OPENCV_ENABLE_NONFREE=ON` is required for the SURF path.
+
+Build is trimmed to the 17 modules BundleTrack actually references (traced from its
+includes and `cv::cuda::` symbols) rather than all of OpenCV:
+`core,imgproc,imgcodecs,highgui,videoio,calib3d,features2d,flann,video,cudev,cudaarithm,
+cudawarping,cudaimgproc,cudafeatures2d,cudaoptflow,xfeatures2d,rgbd`, with tests, docs,
+examples, python bindings and Java off.
+
+**Link failure to expect:** `/usr/bin/ld: cannot find -lva / -lva-drm`. OpenCV picks up
+VA-API *headers* from the conda env (it is on PATH for cmake) but the libraries are not
+linkable. Fix: `-DWITH_VA=OFF -DWITH_VA_INTEL=OFF -DWITH_LIBVA=OFF`.
+
+### Stage 6 — PCL 1.11+ smart-pointer migration
+
+`pcl::PointCloud<T>::Ptr` changed from `boost::shared_ptr` to `std::shared_ptr` in PCL
+1.11. BundleTrack is written against the older API, giving errors like:
+
+```
+Frame.cpp:103: no match for 'operator=' (operand types are
+  'pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr' {aka 'std::shared_ptr<...>'} and
+  'boost::shared_ptr<...>')
+```
+11 distinct sites, 53 error lines in `Bundler.cpp` and 26 in `Frame.cpp`.
+
+Pinning PCL backwards does **not** work: PCL 1.8 uses `boost::shared_ptr` and needs no
+patches, but it includes `boost/detail/endian.hpp`, removed in **Boost 1.69**. Old PCL and
+modern Boost are mutually exclusive, so the source has to move forward.
+
+Fix: replaced **52** occurrences of `boost::shared_ptr`/`boost::make_shared` with the
+`std::` equivalents across `Utils.h`, `Utils.cpp`, `Frame.cpp`, adding `<memory>` where
+missing. Every occurrence was a PCL type — nothing else in BundleTrack used boost smart
+pointers — so the blanket replacement is safe. Bundler.cpp needed no edits; its errors
+were downstream call sites.
+
+### Stage 6 — other fixes
+
+- **`cicc: not found`.** The deprecated `FindCUDA` module invokes nvcc such that it
+  resolves its internal compiler `cicc` via `PATH` instead of relative to itself. Add
+  `$CUDA_HOME/nvvm/bin` to `PATH` (note: on this conda layout `cicc` is at
+  `$CUDA_HOME/nvvm/bin/cicc`, not under `targets/`).
+- **PCL visualization / VTK.** A bare `find_package(PCL REQUIRED)` pulls in the
+  `visualization` component, which hard-requires VTK. The only `pcl/visualization`
+  includes in BundleTrack are commented out, so the fix is to request just the components
+  used: `common io features filters octree recognition registration sample_consensus
+  search kdtree`.
+- **`AT_DISPATCH_FLOATING_TYPES(tensor.type(), ...)`** in `mycuda/common.cu` — `.type()`
+  returns the deprecated `DeprecatedTypeProperties`; modern torch requires
+  `.scalar_type()`. Three call sites.
