@@ -662,3 +662,61 @@ research repo plus a distro newer than the one it was written for.
 **Not done** (out of scope so far): LoFTR `outdoor_ds.ckpt` weights (manual Google Drive
 download), the 71 GB benchmark dataset beyond the 70 MB `robot_system_id_data` already
 fetched, and an end-to-end `run_asset_generation.py` run.
+
+---
+
+## End-to-end smoke run — what only surfaced at runtime
+
+Component tests (every extension imports, every kernel runs) passed while **five** separate
+problems remained. All of these needed an actual pipeline run to find.
+
+**1. neuralangelo's nested `third_party/colmap` submodule was never initialised.**
+`convert_data_to_json.py` does
+`from third_party.colmap.scripts.python.read_write_model import ...`, which fails at
+*import* of `run_asset_generation.py`. The neuralangelo step in the README has a second
+`git submodule init && git submodule update` that is easy to miss. `git submodule update
+--depth 1` fails here with `fatal: transport 'file' not allowed`; fetch the pinned commit
+directly instead:
+```bash
+git init . && git remote add origin https://github.com/colmap/colmap.git
+git fetch --depth 1 origin 43de802cfb3ed2bd155150e7e5e3e8c8dd5aaa3e && git checkout FETCH_HEAD
+```
+
+**2. torchvision's bundled libjpeg shadows conda's.**
+```
+ImportError: .../r2s-bundlesdf/lib/libtiff.so.6: undefined symbol: jpeg12_write_raw_data
+```
+conda's `libjpeg.so.8` *does* export the 26 `jpeg12_*` symbols and resolves correctly on
+its own. But `torchvision.libs/libjpeg.*.so.8` has **SONAME `libjpeg.so.8`** too and lacks
+them, and `bundlesdf.py` imports torch before `my_cpp`, so the loader reuses torchvision's
+copy. Fix: `export LD_PRELOAD=$DEPS_ENV/lib/libjpeg.so.8`.
+
+**3. Trimming upstream's pip list removed load-bearing packages.**
+`dearpygui` (gui.py), `pymeshlab`, `yacs` (LoFTR config). Resolve the import chain locally
+(`python -c "import bundlesdf"`) rather than one full pipeline launch per missing module.
+
+**4. `--use_gui 1` hangs headless.** `run_asset_generation.py` passes it to
+`run_custom.py`, and `bundlesdf.py` then spawns a dearpygui window as a
+`multiprocessing.Process`. With no display it never signals started and the run blocks
+forever. Set `--use_gui 0`. Note installing `dearpygui` turns a clean crash into a silent
+hang, so fix 3 makes this one *harder* to see.
+
+**5. `mycuda` must be installed EDITABLE — the inverse of simple-knn.**
+`mycuda/setup.py` declares top-level extensions `common` and `gridencoder`, but `Utils.py`
+does `from mycuda import common`. A non-editable install puts `common.so` in site-packages
+as a top-level module and leaves `mycuda/` without it:
+```
+ImportError: cannot import name 'common' from 'mycuda' (unknown location)
+```
+That import sits in a `try/except` which swallows it, a NeRF worker process then dies, and
+the parent blocks on its pipe **forever at 0% CPU and 0% GPU with no error printed**.
+
+Diagnosing it needed kernel-level evidence, not the log: main thread in
+`poll_schedule_timeout`, all worker threads in `futex_do_wait`, and a **zombie child**.
+(`py-spy dump` is blocked by ptrace_scope without root; `/proc/<pid>/task/*/wchan` and
+`ps --ppid` work fine.)
+
+Worth stating plainly: **simple-knn must be non-editable** (no `__init__.py`, so the
+editable finder maps nothing) while **mycuda must be editable** (the code imports it as a
+package). Upstream's setup.bash uses `-e` for both; correcting that uniformly breaks one
+or the other.
