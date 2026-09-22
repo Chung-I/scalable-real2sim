@@ -132,7 +132,8 @@ def run_bundle_sdf_tracking_and_reconstruction(
     subprocess.run(
         "source .venv/bin/activate && "
         f"python run_custom.py --video_dir {data_dir} "
-        f"--out_folder {output_dir} --use_gui 1 "
+        f"--out_folder {output_dir} --use_gui 0 "  # blackwell-port: 1 spawns a
+        # dearpygui window via multiprocessing and hangs forever on a headless run
         f"--interpolate_missing_vertices {int(interpolate_missing_vertices)}",
         cwd=bundle_sdf_dir,
         shell=True,
